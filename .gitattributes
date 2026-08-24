@@ -1,0 +1,13 @@
+# Los CSV se escriben siempre con LF desde Python. Forzar LF evita que Windows los
+# convierta a CRLF y rompa la comparacion byte a byte que garantiza la idempotencia.
+* text=auto eol=lf
+
+*.csv text eol=lf
+*.py  text eol=lf
+*.md  text eol=lf
+*.yml text eol=lf
+*.txt text eol=lf
+
+*.png binary
+*.zip binary
+*.pdf binary

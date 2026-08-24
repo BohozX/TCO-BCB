@@ -2,7 +2,6 @@ name: Actualizacion diaria TCO-BCB
 
 on:
   schedule:
-    # 02:00 UTC = 22:00 en Bolivia (UTC-4)
     - cron: "0 2 * * *"
   workflow_dispatch:
 
@@ -35,32 +34,27 @@ jobs:
         id: correr
         run: |
           set +e
-          python main.py
+          python codigo/main.py
           echo "rc=$?" >> "$GITHUB_OUTPUT"
 
       - name: Comprobar si hay cambios
         id: cambios
         run: |
-          if [ -n "$(git status --porcelain data status)" ]; then
+          if [ -n "$(git status --porcelain datos estado)" ]; then
             echo "hay=1" >> "$GITHUB_OUTPUT"
           else
             echo "hay=0" >> "$GITHUB_OUTPUT"
-            echo "Sin cambios: no se genera commit."
           fi
 
       - name: Commit y push
         if: steps.cambios.outputs.hay == '1'
         run: |
-          # Se firma con la identidad del propietario para que Contributors no liste
-          # al bot de Actions. El permiso sigue viniendo del GITHUB_TOKEN efimero.
           git config user.name  "Daniel Bohoz Oros Trujillo"
           git config user.email "283808960+BohozX@users.noreply.github.com"
-          git add data status
+          git add datos estado
           git commit -m "Actualizacion BCB $(TZ=America/La_Paz date +'%Y-%m-%d')"
           git push
 
       - name: Propagar el resultado de main.py
         if: steps.correr.outputs.rc != '0'
-        run: |
-          echo "main.py termino con codigo ${{ steps.correr.outputs.rc }}"
-          exit 1
+        run: exit 1

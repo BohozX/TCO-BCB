@@ -299,17 +299,38 @@ def construir_tco(serie_pdf: dict, tco_ops: dict):
     return filas
 
 
-def pivotar(filas, fijas, clave, orden, sufijos, bancos):
-    tabla, ordenamiento = {}, {}
-    for f in filas:
-        k = clave(f)
-        if k not in tabla:
-            tabla[k] = {c: f[c] for c in fijas}
-            ordenamiento[k] = orden(f)
-        for suf in sufijos:
-            tabla[k][f"{f['banco']} {suf}"] = f[suf]
-    campos = list(fijas) + [f"{b} {s}" for b in bancos for s in sufijos]
-    return campos, [tabla[k] for k in sorted(tabla, key=lambda k: ordenamiento[k])]
+def empaquetar_detalle(detalle, bancos):
+    por, vigencias = {}, {}
+    for d in detalle:
+        if d["banco"] not in bancos:
+            continue
+        vigencias[d["fecha_corte"]] = d["vigencia"]
+        por.setdefault((d["fecha_corte"], d["banco"]), []).append((d["_tc"], d["tc"], d["Monto"]))
+
+    filas = []
+    for fecha in sorted(vigencias):
+        listas = {b: sorted(por.get((fecha, b), [])) for b in bancos}
+        for i in range(max((len(v) for v in listas.values()), default=0)):
+            fila = {"fecha_corte": fecha, "vigencia": vigencias[fecha]}
+            for b in bancos:
+                v = listas[b]
+                if i < len(v):
+                    fila[f"{b} Precio"] = v[i][1]
+                    fila[f"{b} Monto"] = v[i][2]
+            filas.append(fila)
+
+    campos = ["fecha_corte", "vigencia"] + [f"{b} {s}" for b in bancos for s in ("Precio", "Monto")]
+    return campos, filas
+
+
+def agregar_bancos(bancos_filas, orden):
+    por = {}
+    for b in bancos_filas:
+        fila = por.setdefault(b["fecha_corte"],
+                              {"fecha_corte": b["fecha_corte"], "vigencia": b["vigencia"]})
+        fila[f"{b['banco']} Monto"] = b["Monto"]
+    campos = ["fecha_corte", "vigencia"] + [f"{b} Monto" for b in orden]
+    return campos, [por[k] for k in sorted(por)]
 
 
 def escribir_csv(ruta: str, campos: list[str], filas: list[dict]) -> bool:
@@ -730,14 +751,9 @@ def ejecutar(reconstruir: bool = False) -> int:
     bancos.sort(key=lambda b: (b["fecha_corte"], b["banco"] == TOTAL_BANCOS, b["banco"]))
     est_ok = validar_estructura(filas_tco, bancos, detalle)
 
-    campos_det, filas_det = pivotar(
-        detalle, ["fecha_corte", "vigencia", "tc"],
-        lambda f: (f["fecha_corte"], f["tc"]), lambda f: (f["fecha_corte"], f["_tc"]),
-        ["N", "Monto"], orden_bancos)
-    campos_ban, filas_ban = pivotar(
-        bancos, ["fecha_corte", "vigencia"],
-        lambda f: f["fecha_corte"], lambda f: f["fecha_corte"],
-        ["N", "Monto", "TCO"], orden_bancos)
+    reales = [b for b in orden_bancos if b != TOTAL_BANCOS]
+    campos_det, filas_det = empaquetar_detalle(detalle, reales)
+    campos_ban, filas_ban = agregar_bancos(bancos, orden_bancos)
 
     cambio_tco = escribir_csv(CSV_TCO, ["fecha_corte", "vigencia", "tco_compra", "tco_venta"],
                               filas_tco)

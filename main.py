@@ -538,6 +538,7 @@ def actualizar_raw(nuevos: dict) -> tuple[bool, int]:
     """
     miembros: dict[str, bytes] = {}
     huellas: dict[str, str] = {}
+    manifiesto_previo = None
     if os.path.exists(RAW_ZIP):
         try:
             with zipfile.ZipFile(RAW_ZIP) as z:
@@ -546,11 +547,12 @@ def actualizar_raw(nuevos: dict) -> tuple[bool, int]:
                     if n != "manifest.json":
                         miembros[n] = z.read(n)
                 if "manifest.json" in nombres:
-                    previo = json.loads(z.read("manifest.json").decode("utf-8"))
+                    manifiesto_previo = z.read("manifest.json")
+                    previo = json.loads(manifiesto_previo.decode("utf-8"))
                     huellas = {n: d["huella"] for n, d in previo.items() if d.get("huella")}
         except (zipfile.BadZipFile, ValueError, KeyError):
             error("data/raw.zip existente esta corrupto; se regenera desde cero.")
-            miembros, huellas = {}, {}
+            miembros, huellas, manifiesto_previo = {}, {}, None
 
     for nombre, (contenido, huella) in nuevos.items():
         if huella is not None:
@@ -571,6 +573,12 @@ def actualizar_raw(nuevos: dict) -> tuple[bool, int]:
         indent=1, ensure_ascii=False, sort_keys=True,
     ).encode("utf-8")
 
+    # La decision de reescribir se toma sobre el manifiesto, no sobre los bytes del ZIP:
+    # zlib comprime distinto segun su version, asi que un mismo contenido puede producir
+    # bytes diferentes en otra maquina y generaria commits sin ningun cambio real.
+    if manifiesto_previo == manifiesto and os.path.exists(RAW_ZIP):
+        return False, len(miembros)
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         for nombre in sorted(list(miembros) + ["manifest.json"]):
@@ -579,16 +587,8 @@ def actualizar_raw(nuevos: dict) -> tuple[bool, int]:
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o644 << 16
             z.writestr(info, datos)
-    nuevo = buf.getvalue()
-
-    anterior = None
-    if os.path.exists(RAW_ZIP):
-        with open(RAW_ZIP, "rb") as fh:
-            anterior = fh.read()
-    if anterior == nuevo:
-        return False, len(miembros)
     with open(RAW_ZIP, "wb") as fh:
-        fh.write(nuevo)
+        fh.write(buf.getvalue())
     return True, len(miembros)
 
 

@@ -148,16 +148,15 @@ def parsear_operaciones(contenido: bytes):
             if etiqueta == "TOTAL":
                 bancos.append({
                     "fecha_corte": corte, "vigencia": vigencia, "banco": banco,
-                    "N": literal(cn), "Monto": literal(cm), "TCO": "",
+                    "Monto": literal(cm),
                     "_n": numero(cn), "_m": numero(cm), "_tco": None,
                 })
             elif etiqueta == "TCO":
                 if banco == TOTAL_BANCOS and numero(cn) is not None:
                     for dia in dias_de_vigencia(vigencia):
-                        tco_ops[dia] = (corte, literal(cn), numero(cn))
+                        tco_ops[dia] = (corte, numero(cn))
                 for b in reversed(bancos):
                     if b["fecha_corte"] == corte and b["banco"] == banco:
-                        b["TCO"] = literal(cn)
                         b["_tco"] = numero(cn)
                         break
             else:
@@ -168,7 +167,7 @@ def parsear_operaciones(contenido: bytes):
                     continue
                 detalle.append({
                     "fecha_corte": corte, "vigencia": vigencia, "banco": banco, "tc": tc,
-                    "N": literal(cn), "Monto": literal(cm),
+                    "Monto": literal(cm),
                     "_tc": numero(etiqueta), "_n": numero(cn), "_m": numero(cm),
                 })
 
@@ -291,7 +290,7 @@ def construir_tco(serie_pdf: dict, tco_ops: dict):
             continue
         venta = reg["venta"] or str(Decimal(compra) + SPREAD)
         filas.append({
-            "fecha_corte": tco_ops.get(vigencia, ("", "", None))[0],
+            "fecha_corte": tco_ops.get(vigencia, ("", None))[0],
             "vigencia": vigencia,
             "tco_compra": compra,
             "tco_venta": venta,
@@ -371,7 +370,7 @@ def validar_csv_vs_pdf(tco_ops: dict, serie_pdf: dict):
 
     coincidencias, diferencias = 0, []
     for v in comunes:
-        a, b = tco_ops[v][2], oficial(v)
+        a, b = tco_ops[v][1], oficial(v)
         if b is None:
             diferencias.append((v, a, None, None))
         elif abs(a - b) <= TOL_TCO:

@@ -28,7 +28,14 @@ BASE = "https://www.bcb.gob.bo/"
 URL_SERIE = BASE + "?q=content/tipo-de-cambio-oficial-del-d%C3%B3lar-estadounidense-serie-de-tiempo"
 URL_HTML = BASE + "tiposDeCambioHistorico/index.php?anio={anio}"
 URL_PDF = BASE + "tiposDeCambioHistorico/pdf.php?anio={anio}"
-URL_OPERACIONES = BASE + "tco_tcreferencial_descargar_csv.php?desde={desde}&hasta={hasta}"
+# El BCB publica el detalle de operaciones por dos endpoints distintos. Se leen los
+# dos: el publico es el que alimenta la pagina oficial y trae los cortes recientes;
+# el legado quedo congelado en el corte 2026-08-20 pero se conserva porque cubre el
+# mismo historico y permite contrastar una fuente contra la otra.
+URL_OPERACIONES = [
+    ("publico", BASE + "bcb_tco_publico_descargar_csv.php?desde={desde}&hasta={hasta}"),
+    ("legado", BASE + "tco_tcreferencial_descargar_csv.php?desde={desde}&hasta={hasta}"),
+]
 
 FECHA_INICIO = dt.date(2026, 6, 1)
 PRIMER_CORTE = dt.date(2026, 6, 26)
@@ -40,6 +47,9 @@ HUSO_BOLIVIA = dt.timezone(dt.timedelta(hours=-4))
 TOL_TCO = 1e-4
 TOL_REDONDEO_CELDA = 0.5
 TOL_PONDERADO = 0.005
+# Los dos endpoints redondean los agregados por separado, asi que un mismo total
+# puede diferir en algun dolar entre uno y otro.
+TOL_FUENTES = 2.0
 
 MESES = {
     "ENERO": 1, "FEBRERO": 2, "MARZO": 3, "ABRIL": 4, "MAYO": 5, "JUNIO": 6,
@@ -96,6 +106,16 @@ def numero(txt: str):
         return float(s)
     except ValueError:
         return None
+
+
+ACENTOS = str.maketrans("ÁÉÍÓÚÜÑáéíóúüñ", "AEIOUUNaeiouun")
+
+
+def clave_banco(nombre: str) -> str:
+    """Los dos endpoints escriben los bancos distinto (BANCO DE CREDITO vs
+    BANCO DE CRÉDITO). Se comparan sin tildes; el nombre que se publica conserva
+    la forma acentuada cuando alguna de las fuentes la trae."""
+    return " ".join(nombre.translate(ACENTOS).upper().split())
 
 
 def dias_de_vigencia(txt: str) -> list[str]:
@@ -172,6 +192,106 @@ def parsear_operaciones(contenido: bytes):
                 })
 
     return detalle, bancos, tco_ops, cortes, orden_bancos
+
+
+CHOQUES = [0]
+
+
+def fundir(base, otra, donde):
+    """Completa en 'base' lo que solo trae 'otra', y contrasta lo que ambas
+    publican. Un hueco en una fuente no es un conflicto: es justo lo que la otra
+    viene a cubrir. Solo se reporta cuando las dos dan un valor y no cuadran."""
+    completados = 0
+    for texto, num in (("Monto", "_m"),):
+        if not base[texto] and otra[texto]:
+            base[texto], base[num] = otra[texto], otra[num]
+            completados += 1
+        elif base[num] is not None and otra[num] is not None \
+                and abs(base[num] - otra[num]) > TOL_FUENTES:
+            CHOQUES[0] += 1
+            error(f"{donde}: monto distinto entre fuentes "
+                  f"({base[num]:.0f} vs {otra[num]:.0f})")
+
+    for campo in ("_n", "_tco"):
+        if campo not in base:
+            continue
+        if base[campo] is None and otra.get(campo) is not None:
+            base[campo] = otra[campo]
+            completados += 1
+        elif base[campo] is not None and otra.get(campo) is not None:
+            tol = TOL_TCO if campo == "_tco" else 0.5
+            if abs(base[campo] - otra[campo]) > tol:
+                CHOQUES[0] += 1
+                error(f"{donde}: {campo} distinto entre fuentes "
+                      f"({base[campo]} vs {otra[campo]})")
+    return completados
+
+
+def combinar_operaciones(fuentes):
+    """Une lo que publica cada endpoint. La primera fuente manda, las siguientes
+    rellenan lo que a la primera le falte, y donde ambas coinciden se contrastan.
+    Asi, si una se queda congelada, la otra sostiene la serie."""
+    nombres, detalle, bancos, tco_ops, orden = {}, {}, {}, {}, []
+    aporte, completados = {}, 0
+    CHOQUES[0] = 0
+    tildes = lambda t: sum(1 for c in t if ord(c) > 127)
+
+    for etiqueta, (det, ban, tco, cortes_f, orden_f) in fuentes:
+        aporte[etiqueta] = 0
+
+        for banco in orden_f:
+            k = clave_banco(banco)
+            if k not in nombres or tildes(banco) > tildes(nombres[k]):
+                nombres[k] = banco
+            if k not in orden:
+                orden.append(k)
+
+        for fila in det:
+            k = (fila["fecha_corte"], clave_banco(fila["banco"]), fila["tc"])
+            if k not in detalle:
+                detalle[k] = fila
+                aporte[etiqueta] += 1
+                continue
+            completados += fundir(detalle[k], fila, f"{fila['fecha_corte']} {fila['banco']} "
+                                                    f"TC={fila['tc']}")
+
+        for fila in ban:
+            k = (fila["fecha_corte"], clave_banco(fila["banco"]))
+            if k not in bancos:
+                bancos[k] = fila
+                continue
+            completados += fundir(bancos[k], fila, f"{fila['fecha_corte']} {fila['banco']}")
+
+        for dia, valor in tco.items():
+            if dia in tco_ops:
+                if abs(tco_ops[dia][1] - valor[1]) > TOL_TCO:
+                    CHOQUES[0] += 1
+                    error(f"Vigencia {dia}: TCO distinto entre fuentes "
+                          f"({tco_ops[dia][1]} vs {valor[1]})")
+                continue
+            tco_ops[dia] = valor
+
+    for fila in list(detalle.values()) + list(bancos.values()):
+        fila["banco"] = nombres[clave_banco(fila["banco"])]
+
+    cortes = sorted({f["fecha_corte"] for f in bancos.values()})
+    clave_total = clave_banco(TOTAL_BANCOS)
+    orden_bancos = [nombres[k] for k in orden if k != clave_total]
+    orden_bancos.append(nombres.get(clave_total, TOTAL_BANCOS))
+
+    print()
+    print("--- Fuentes de operaciones ---")
+    for etiqueta, (_, _, _, cs, _) in fuentes:
+        rango = f"{cs[0]} -> {cs[-1]}" if cs else "sin datos"
+        print(f"    {etiqueta:9s}: {len(cs):3d} cortes ({rango})")
+    print(f"    combinado : {len(cortes):3d} cortes | filas nuevas por fuente: "
+          + ", ".join(f"{k}={v}" for k, v in aporte.items()))
+    print(f"    huecos de una fuente cubiertos por la otra: {completados}")
+    if CHOQUES[0] == 0 and len(fuentes) > 1:
+        ok(f"las fuentes coinciden en todo lo que ambas publican "
+           f"(tolerancia {TOL_FUENTES:.0f} USD por redondeo)")
+
+    return list(detalle.values()), list(bancos.values()), tco_ops, cortes, orden_bancos
 
 
 def parsear_pdf_anual(contenido: bytes, anio: int):
@@ -736,9 +856,19 @@ def ejecutar(reconstruir: bool = False) -> int:
     ok(f"PDF anual leido: {len(serie_pdf)} dias | HTML anual leido: {len(serie_html)} dias")
 
     hasta = (ahora.date() + dt.timedelta(days=3)).isoformat()
-    ops = descargar(URL_OPERACIONES.format(desde=PRIMER_CORTE.isoformat(), hasta=hasta))
-    detalle, bancos, tco_ops, cortes, orden_bancos = parsear_operaciones(ops)
-    ok(f"CSV de operaciones leido: {len(cortes)} fechas de corte")
+    fuentes = []
+    for etiqueta, plantilla in URL_OPERACIONES:
+        try:
+            crudo = descargar(plantilla.format(desde=PRIMER_CORTE.isoformat(), hasta=hasta))
+            fuentes.append((etiqueta, crudo, parsear_operaciones(crudo)))
+        except Exception as exc:  # noqa: BLE001
+            aviso(f"La fuente de operaciones '{etiqueta}' no respondio: {exc}")
+    if not fuentes:
+        raise RuntimeError("Ninguna de las fuentes de operaciones respondio.")
+
+    detalle, bancos, tco_ops, cortes, orden_bancos = combinar_operaciones(
+        [(etiqueta, resultado) for etiqueta, _, resultado in fuentes])
+    ok(f"operaciones leidas de {len(fuentes)} fuente(s): {len(cortes)} fechas de corte")
 
     ult_corte = cortes[-1] if cortes else None
     filas_tco = construir_tco(serie_pdf, tco_ops)
@@ -772,18 +902,20 @@ def ejecutar(reconstruir: bool = False) -> int:
     res_cv = validar_compra_venta(filas_tco, serie_html, serie_pdf, solapados)
     res_ops = validar_operaciones(detalle, bancos)
 
-    lineas = ops.decode("utf-8-sig", "replace").splitlines()
-    i_cab = next((i for i, l in enumerate(lineas)
-                  if l.lower().startswith('"fecha de corte"')), None)
-    encabezado = lineas[i_cab:i_cab + 2] if i_cab is not None else []
-    por_corte: dict[str, list[str]] = {c: [] for c in cortes}
-    for l in lineas:
-        c = l.split(";", 1)[0]
-        if c in por_corte:
-            por_corte[c].append(l)
-    for corte, filas in por_corte.items():
-        crudos[f"operaciones/{corte}.csv"] = (("\n".join(encabezado + filas) + "\n").encode("utf-8"),
-                                              None)
+    for etiqueta, crudo, (_, _, _, cortes_fuente, _) in fuentes:
+        lineas = crudo.decode("utf-8-sig", "replace").splitlines()
+        i_cab = next((i for i, l in enumerate(lineas)
+                      if l.lower().startswith('"fecha de corte"')), None)
+        encabezado = lineas[i_cab:i_cab + 2] if i_cab is not None else []
+        por_corte: dict[str, list[str]] = {c: [] for c in cortes_fuente}
+        for l in lineas:
+            c = l.split(";", 1)[0]
+            if c in por_corte:
+                por_corte[c].append(l)
+        carpeta = "operaciones" if etiqueta == "publico" else f"operaciones_{etiqueta}"
+        for corte, filas in por_corte.items():
+            cuerpo = "\n".join(encabezado + filas) + "\n"
+            crudos[f"{carpeta}/{corte}.csv"] = (cuerpo.encode("utf-8"), None)
 
     cambio_raw, n_raw = actualizar_raw(crudos)
     ok(f"raw.zip {'actualizado' if cambio_raw else 'sin cambios'} ({n_raw} archivos)")

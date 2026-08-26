@@ -53,6 +53,7 @@ jobs:
           git config user.email "283808960+BohozX@users.noreply.github.com"
           git add datos estado
           git commit -m "Actualizacion BCB $(TZ=America/La_Paz date +'%Y-%m-%d')"
+          git pull --rebase origin main
           git push
 
       - name: Propagar el resultado de main.py

@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Instalar Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
@@ -48,13 +50,26 @@ jobs:
 
       - name: Commit y push
         if: steps.cambios.outputs.hay == '1'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           git config user.name  "Daniel Bohoz Oros Trujillo"
           git config user.email "283808960+BohozX@users.noreply.github.com"
           git add datos estado
           git commit -m "Actualizacion BCB $(TZ=America/La_Paz date +'%Y-%m-%d')"
-          git pull --rebase origin main
-          git push
+          REMOTO="https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          for attempt in 1 2 3; do
+            git pull --rebase "$REMOTO" main
+            if git push "$REMOTO" HEAD:main; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "No se pudo publicar la actualizacion despues de 3 intentos." >&2
+              exit 1
+            fi
+            sleep $((attempt * 2))
+          done
 
       - name: Propagar el resultado de main.py
         if: steps.correr.outputs.rc != '0'

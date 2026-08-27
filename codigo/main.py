@@ -786,7 +786,7 @@ def generar_estado(payload: dict) -> bool:
         ("Ultima fecha BCB disponible", payload["ultima_fecha"], None),
         ("Ultimo TCO (compra / venta)", payload["ultimo_tco"], None),
         ("Ultimo corte de operaciones", payload["ultimo_corte"], None),
-        ("Actualizacion programada", "20:30 (Bolivia)", None),
+        ("Actualizacion programada", "20:34 / 22:14 / 23:49 (Bolivia)", None),
     ])
     y = bloque(y - 1.8, "Archivos", [
         ("datos/tco.csv", payload["tco"], col(payload["tco"])),

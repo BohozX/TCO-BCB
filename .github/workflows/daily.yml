@@ -2,8 +2,18 @@ name: Actualizacion diaria TCO-BCB
 
 on:
   schedule:
-    - cron: "30 0 * * *"
+    # UTC = 20:34, 22:14 y 23:49 del dia anterior en Bolivia.
+    # Los intentos posteriores salen rapido si el corte diario ya esta completo.
+    - cron: "34 0 * * *"
+    - cron: "14 2 * * *"
+    - cron: "49 3 * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Procesar aunque el corte del dia ya este completo"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -29,10 +39,29 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: Comprobar si el corte diario ya esta completo
+        id: corte
+        env:
+          FORCE_RUN: ${{ inputs.force || 'false' }}
+        run: |
+          set -euo pipefail
+          if [ "$FORCE_RUN" = "true" ]; then
+            echo "procesar=1" >> "$GITHUB_OUTPUT"
+            echo "Ejecucion completa forzada manualmente."
+          elif python codigo/verificar_corte_completo.py; then
+            echo "procesar=0" >> "$GITHUB_OUTPUT"
+            echo "El corte ya esta completo; no se repite el procesamiento."
+          else
+            echo "procesar=1" >> "$GITHUB_OUTPUT"
+            echo "El corte aun no esta completo; se consulta y valida el BCB."
+          fi
+
       - name: Instalar dependencias
+        if: steps.corte.outputs.procesar == '1'
         run: pip install -r requirements.txt
 
       - name: Ejecutar main.py
+        if: steps.corte.outputs.procesar == '1'
         id: correr
         run: |
           set +e
@@ -40,6 +69,7 @@ jobs:
           echo "rc=$?" >> "$GITHUB_OUTPUT"
 
       - name: Comprobar si hay cambios
+        if: steps.corte.outputs.procesar == '1'
         id: cambios
         run: |
           if [ -n "$(git status --porcelain datos estado)" ]; then
@@ -49,7 +79,7 @@ jobs:
           fi
 
       - name: Commit y push
-        if: steps.cambios.outputs.hay == '1'
+        if: steps.corte.outputs.procesar == '1' && steps.cambios.outputs.hay == '1'
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -72,5 +102,5 @@ jobs:
           done
 
       - name: Propagar el resultado de main.py
-        if: steps.correr.outputs.rc != '0'
+        if: steps.corte.outputs.procesar == '1' && steps.correr.outputs.rc != '0'
         run: exit 1

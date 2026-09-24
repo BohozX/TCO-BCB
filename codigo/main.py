@@ -560,10 +560,13 @@ def validar_compra_venta(filas_tco, serie_html, serie_pdf, solapados):
     print(f"    diferencias              : {difs}")
     print(f"    spread distinto de {SPREAD}  : {spread_malo}")
     print(f"    omitidas por solapamiento: {omitidas}")
-    if difs == 0 and spread_malo == 0:
+    if not serie_html:
+        print("    tabla HTML del BCB no disponible: solo se valido el spread")
+    elif difs == 0 and spread_malo == 0:
         ok(f"compra/venta validadas contra el HTML del BCB ({comparadas} fechas)")
 
-    return {"comparadas": comparadas, "diferencias": difs + spread_malo}
+    return {"comparadas": comparadas, "diferencias": difs + spread_malo,
+            "sin_html": not serie_html}
 
 
 def validar_operaciones(detalle, bancos):
@@ -779,7 +782,7 @@ def generar_estado(payload: dict) -> bool:
         return y
 
     def col(v):
-        return VERDE if v in ("OK", "SIN CAMBIOS") else ROJO
+        return VERDE if v in ("OK", "SIN CAMBIOS") else ORO if v == "SOLO SPREAD" else ROJO
 
     y = bloque(71.5, "Informacion de la corrida", [
         ("Ultima corrida", payload["corrida"], None),
@@ -850,9 +853,12 @@ def ejecutar(reconstruir: bool = False) -> int:
         solapados |= solap
         crudos[f"historico/{anio}.pdf"] = (pdf, huella)
 
-        htm = descargar(URL_HTML.format(anio=anio))
-        serie_html.update(parsear_html_anual(htm, anio))
-        crudos[f"tco/{anio}.html"] = (htm, None)
+        try:
+            htm = descargar(URL_HTML.format(anio=anio))
+            serie_html.update(parsear_html_anual(htm, anio))
+            crudos[f"tco/{anio}.html"] = (htm, None)
+        except Exception as exc:  # noqa: BLE001
+            aviso(f"Tabla HTML {anio} del BCB no disponible; se omite su validacion: {exc}")
     ok(f"PDF anual leido: {len(serie_pdf)} dias | HTML anual leido: {len(serie_html)} dias")
 
     hasta = (ahora.date() + dt.timedelta(days=3)).isoformat()
@@ -934,7 +940,8 @@ def ejecutar(reconstruir: bool = False) -> int:
         "detalle": "OK" if cambio_det else "SIN CAMBIOS",
         "raw": "OK" if cambio_raw else "SIN CAMBIOS",
         "val_pdf": "OK" if res_pdf["diferencias"] == 0 else "DIFERENCIAS",
-        "val_cv": "OK" if res_cv["diferencias"] == 0 else "DIFERENCIAS",
+        "val_cv": ("DIFERENCIAS" if res_cv["diferencias"]
+                   else "SOLO SPREAD" if res_cv["sin_html"] else "OK"),
         "val_ops": "OK" if val_ops_ok else "DIFERENCIAS",
         "val_est": "OK" if est_ok else "DIFERENCIAS",
         "detalle_texto": (f"CSV vs PDF: {res_pdf['coincidencias']}/{res_pdf['comparadas']} fechas "

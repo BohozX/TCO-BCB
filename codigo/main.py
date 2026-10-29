@@ -50,6 +50,7 @@ TOL_PONDERADO = 0.005
 # Los dos endpoints redondean los agregados por separado, asi que un mismo total
 # puede diferir en algun dolar entre uno y otro.
 TOL_FUENTES = 2.0
+CORTE_MEDIANA_TCO = "2026-09-25"
 
 MESES = {
     "ENERO": 1, "FEBRERO": 2, "MARZO": 3, "ABRIL": 4, "MAYO": 5, "JUNIO": 6,
@@ -192,6 +193,65 @@ def parsear_operaciones(contenido: bytes):
                 })
 
     return detalle, bancos, tco_ops, cortes, orden_bancos
+
+
+def sin_formula(txt: str) -> str:
+    s = (txt or "").strip()
+    m = re.fullmatch(r'="(.*)"', s)
+    return m.group(1) if m else s
+
+
+def detalle_desde_raw(orden_bancos):
+    with zipfile.ZipFile(RAW_ZIP) as z:
+        archivos = [(n, z.read(n)) for n in sorted(z.namelist())
+                    if re.fullmatch(r"operaciones/\d{4}-\d{2}-\d{2}\.csv", n)]
+
+    nombres = {clave_banco(b): b for b in orden_bancos}
+    detalle, totales, nuevos = [], {}, []
+    for archivo, contenido in archivos:
+        corte = archivo[len("operaciones/"):-len(".csv")]
+        filas = list(csv.reader(contenido.decode("utf-8-sig").splitlines(), delimiter=";"))
+        idx = next((i for i, f in enumerate(filas)
+                    if f and f[0].strip().lower().startswith("fecha de corte")), None)
+        if idx is None or idx + 1 >= len(filas):
+            raise RuntimeError(f"raw.zip {archivo}: falta el encabezado 'Fecha de corte'.")
+        cab, sub = filas[idx], filas[idx + 1]
+
+        columnas = []
+        for j in range(3, len(cab)):
+            banco = cab[j].strip()
+            if not banco:
+                continue
+            if [c.strip() for c in sub[j:j + 2]] != ["N°", "Monto"]:
+                raise RuntimeError(f"raw.zip {archivo}: '{banco}' no tiene las columnas N° y Monto.")
+            k = clave_banco(banco)
+            if k not in nombres:
+                nombres[k] = banco
+                nuevos.append(banco)
+            columnas.append((nombres[k], j))
+        if not columnas or clave_banco(columnas[-1][0]) != clave_banco(TOTAL_BANCOS):
+            raise RuntimeError(f"raw.zip {archivo}: encabezado de bancos inesperado.")
+
+        for f in filas[idx + 2:]:
+            if len(f) < 4 or f[0].strip() != corte:
+                continue
+            vigencia, etiqueta = f[1].strip(), f[2].strip()
+            for banco, j in columnas:
+                cn = sin_formula(f[j] if j < len(f) else "")
+                cm = sin_formula(f[j + 1] if j + 1 < len(f) else "")
+                if etiqueta == "TOTAL":
+                    totales[(corte, banco)] = (numero(cn), numero(cm))
+                elif etiqueta != "TCO" and numero(etiqueta) is not None \
+                        and (numero(cn) is not None or numero(cm) is not None):
+                    detalle.append({
+                        "fecha_corte": corte, "vigencia": vigencia, "banco": banco,
+                        "tc": literal(etiqueta), "Monto": literal(cm),
+                        "_tc": numero(etiqueta), "_n": numero(cn), "_m": numero(cm),
+                    })
+
+    ok(f"detalle leido de raw.zip: {len(archivos)} cortes de operaciones/"
+       + (f" | bancos que no estan en la descarga del dia: {nuevos}" if nuevos else ""))
+    return detalle, totales, nuevos
 
 
 CHOQUES = [0]
@@ -569,17 +629,29 @@ def validar_compra_venta(filas_tco, serie_html, serie_pdf, solapados):
             "sin_html": not serie_html}
 
 
+def mediana_ponderada(pares):
+    total = sum((m for _, m in pares), Decimal(0))
+    acumulado = Decimal(0)
+    for tc, m in sorted(pares):
+        acumulado += m
+        if acumulado * 2 >= total:
+            return tc
+    return None
+
+
 def validar_operaciones(detalle, bancos):
     agr, suma_tc, tot_tc = {}, {}, {}
     for d in detalle:
         if d["banco"] == TOTAL_BANCOS:
             tot_tc[(d["fecha_corte"], d["tc"])] = (d["_n"], d["_m"])
             continue
-        a = agr.setdefault((d["fecha_corte"], d["banco"]), {"n": 0.0, "m": 0.0, "tcm": 0.0, "k": 0})
+        a = agr.setdefault((d["fecha_corte"], d["banco"]),
+                           {"n": 0.0, "m": 0.0, "tcm": 0.0, "k": 0, "pares": []})
         a["n"] += d["_n"] or 0
         a["m"] += d["_m"] or 0
         a["tcm"] += d["_tc"] * (d["_m"] or 0)
         a["k"] += 1
+        a["pares"].append((d["_tc"], Decimal(d["Monto"] or "0")))
         s = suma_tc.setdefault((d["fecha_corte"], d["tc"]), [0.0, 0.0, 0])
         s[0] += d["_n"] or 0
         s[1] += d["_m"] or 0
@@ -607,10 +679,13 @@ def validar_operaciones(detalle, bancos):
                 error(f"{corte} {banco}: monto detalle={a['m']:.0f} vs agregado={p['_m']:.0f} "
                       f"(tolerancia {tol:.1f})")
         if p["_tco"] is not None and a["m"] > 0:
-            pond = a["tcm"] / a["m"]
-            if abs(pond - p["_tco"]) > TOL_PONDERADO:
+            if corte < CORTE_MEDIANA_TCO:
+                nombre, pond = "TCO ponderado", a["tcm"] / a["m"]
+            else:
+                nombre, pond = "TCO mediana ponderada", mediana_ponderada(a["pares"])
+            if abs(pond - p["_tco"]) > TOL_PONDERADO + 1e-9:
                 dif_pond += 1
-                error(f"{corte} {banco}: TCO ponderado={pond:.6f} vs publicado={p['_tco']:.2f} "
+                error(f"{corte} {banco}: {nombre}={pond:.6f} vs publicado={p['_tco']:.2f} "
                       f"dif={pond - p['_tco']:+.6f}")
 
     for k, (n, m, celdas) in sorted(suma_tc.items()):
@@ -629,7 +704,8 @@ def validar_operaciones(detalle, bancos):
     print(f"    pares fecha x banco comparados : {comparadas}")
     print(f"    diferencias en N operaciones   : {dif_n}")
     print(f"    diferencias en monto USD       : {dif_m}   (tolerancia {TOL_REDONDEO_CELDA}/celda)")
-    print(f"    diferencias en TCO ponderado   : {dif_pond} (tolerancia {TOL_PONDERADO})")
+    print(f"    diferencias en TCO ponderado   : {dif_pond} (tolerancia {TOL_PONDERADO}; "
+          f"media antes de {CORTE_MEDIANA_TCO}, mediana desde ese corte)")
     print(f"    filas TC vs TOTAL BANCOS       : {dif_tc}")
     print(f"    agregados no publicados        : {sin_dato}")
     if dif_n == dif_m == dif_pond == dif_tc == 0:
@@ -872,9 +948,35 @@ def ejecutar(reconstruir: bool = False) -> int:
     if not fuentes:
         raise RuntimeError("Ninguna de las fuentes de operaciones respondio.")
 
-    detalle, bancos, tco_ops, cortes, orden_bancos = combinar_operaciones(
+    _, bancos, tco_ops, cortes, orden_bancos = combinar_operaciones(
         [(etiqueta, resultado) for etiqueta, _, resultado in fuentes])
     ok(f"operaciones leidas de {len(fuentes)} fuente(s): {len(cortes)} fechas de corte")
+
+    for etiqueta, crudo, (_, _, _, cortes_fuente, _) in fuentes:
+        lineas = crudo.decode("utf-8-sig", "replace").splitlines()
+        i_cab = next((i for i, l in enumerate(lineas)
+                      if l.lower().startswith('"fecha de corte"')), None)
+        encabezado = lineas[i_cab:i_cab + 2] if i_cab is not None else []
+        por_corte: dict[str, list[str]] = {c: [] for c in cortes_fuente}
+        for l in lineas:
+            c = l.split(";", 1)[0]
+            if c in por_corte:
+                por_corte[c].append(l)
+        carpeta = "operaciones" if etiqueta == "publico" else f"operaciones_{etiqueta}"
+        for corte, filas in por_corte.items():
+            cuerpo = "\n".join(encabezado + filas) + "\n"
+            crudos[f"{carpeta}/{corte}.csv"] = (cuerpo.encode("utf-8"), None)
+
+    cambio_raw, n_raw = actualizar_raw(crudos)
+    ok(f"raw.zip {'actualizado' if cambio_raw else 'sin cambios'} ({n_raw} archivos)")
+
+    detalle, totales, nuevos = detalle_desde_raw(orden_bancos)
+    for b in bancos:
+        n, m = totales.get((b["fecha_corte"], b["banco"]), (None, None))
+        if b["_n"] is None:
+            b["_n"] = n
+        if b["_m"] is None:
+            b["_m"] = m
 
     ult_corte = cortes[-1] if cortes else None
     filas_tco = construir_tco(serie_pdf, tco_ops)
@@ -886,7 +988,7 @@ def ejecutar(reconstruir: bool = False) -> int:
     bancos.sort(key=lambda b: (b["fecha_corte"], b["banco"] == TOTAL_BANCOS, b["banco"]))
     est_ok = validar_estructura(filas_tco, bancos, detalle)
 
-    reales = [b for b in orden_bancos if b != TOTAL_BANCOS]
+    reales = [b for b in orden_bancos if b != TOTAL_BANCOS] + nuevos
     campos_det, filas_det = empaquetar_detalle(detalle, reales)
     campos_ban, filas_ban = agregar_bancos(bancos, orden_bancos)
 
@@ -907,24 +1009,6 @@ def ejecutar(reconstruir: bool = False) -> int:
     res_pdf = validar_csv_vs_pdf(tco_ops, serie_pdf)
     res_cv = validar_compra_venta(filas_tco, serie_html, serie_pdf, solapados)
     res_ops = validar_operaciones(detalle, bancos)
-
-    for etiqueta, crudo, (_, _, _, cortes_fuente, _) in fuentes:
-        lineas = crudo.decode("utf-8-sig", "replace").splitlines()
-        i_cab = next((i for i, l in enumerate(lineas)
-                      if l.lower().startswith('"fecha de corte"')), None)
-        encabezado = lineas[i_cab:i_cab + 2] if i_cab is not None else []
-        por_corte: dict[str, list[str]] = {c: [] for c in cortes_fuente}
-        for l in lineas:
-            c = l.split(";", 1)[0]
-            if c in por_corte:
-                por_corte[c].append(l)
-        carpeta = "operaciones" if etiqueta == "publico" else f"operaciones_{etiqueta}"
-        for corte, filas in por_corte.items():
-            cuerpo = "\n".join(encabezado + filas) + "\n"
-            crudos[f"{carpeta}/{corte}.csv"] = (cuerpo.encode("utf-8"), None)
-
-    cambio_raw, n_raw = actualizar_raw(crudos)
-    ok(f"raw.zip {'actualizado' if cambio_raw else 'sin cambios'} ({n_raw} archivos)")
 
     val_ops_ok = res_ops["dif_n"] == res_ops["dif_m"] == res_ops["dif_pond"] == res_ops["dif_tc"] == 0
     resultado = "EXITOSO" if not ERRORES else "ERROR"

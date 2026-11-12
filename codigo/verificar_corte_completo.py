@@ -1,4 +1,3 @@
-"""Salir sin reprocesar cuando el corte nocturno del BCB ya esta completo."""
 
 from __future__ import annotations
 
@@ -16,7 +15,6 @@ HUSO_BOLIVIA = dt.timezone(dt.timedelta(hours=-4))
 
 
 def ultimo_corte(ruta: Path) -> str:
-    """Devolver la fecha de corte ISO mas reciente de un CSV."""
     if not ruta.is_file():
         return ""
     with ruta.open("r", encoding="utf-8-sig", newline="") as archivo:
@@ -36,7 +34,6 @@ def ultimo_corte(ruta: Path) -> str:
 
 
 def raw_contiene_corte(ruta: Path, fecha: str) -> bool:
-    """Comprobar que raw.zip conserve el CSV publico diario y su manifiesto."""
     if not ruta.is_file():
         return False
     try:
@@ -48,7 +45,6 @@ def raw_contiene_corte(ruta: Path, fecha: str) -> bool:
 
 
 def corte_completo(fecha: str, datos: Path = DATOS) -> tuple[bool, dict[str, object]]:
-    """Exigir el mismo corte en los tres CSV y en el paquete RAW."""
     estado: dict[str, object] = {
         "objetivo": fecha,
         "tco": ultimo_corte(datos / "tco.csv"),

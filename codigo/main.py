@@ -28,10 +28,6 @@ BASE = "https://www.bcb.gob.bo/"
 URL_SERIE = BASE + "?q=content/tipo-de-cambio-oficial-del-d%C3%B3lar-estadounidense-serie-de-tiempo"
 URL_HTML = BASE + "tiposDeCambioHistorico/index.php?anio={anio}"
 URL_PDF = BASE + "tiposDeCambioHistorico/pdf.php?anio={anio}"
-# El BCB publica el detalle de operaciones por dos endpoints distintos. Se leen los
-# dos: el publico es el que alimenta la pagina oficial y trae los cortes recientes;
-# el legado quedo congelado en el corte 2026-08-20 pero se conserva porque cubre el
-# mismo historico y permite contrastar una fuente contra la otra.
 URL_OPERACIONES = [
     ("publico", BASE + "bcb_tco_publico_descargar_csv.php?desde={desde}&hasta={hasta}"),
     ("legado", BASE + "tco_tcreferencial_descargar_csv.php?desde={desde}&hasta={hasta}"),
@@ -47,8 +43,6 @@ HUSO_BOLIVIA = dt.timezone(dt.timedelta(hours=-4))
 TOL_TCO = 1e-4
 TOL_REDONDEO_CELDA = 0.5
 TOL_PONDERADO = 0.005
-# Los dos endpoints redondean los agregados por separado, asi que un mismo total
-# puede diferir en algun dolar entre uno y otro.
 TOL_FUENTES = 2.0
 CORTE_MEDIANA_TCO = "2026-09-25"
 
@@ -85,7 +79,7 @@ def descargar(url: str, intentos: int = 3) -> bytes:
             r = requests.get(url, headers=UA, timeout=90)
             r.raise_for_status()
             return r.content
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             ultimo = exc
             if i + 1 < intentos:
                 time.sleep(3 * (i + 1))
@@ -113,9 +107,6 @@ ACENTOS = str.maketrans("ÁÉÍÓÚÜÑáéíóúüñ", "AEIOUUNaeiouun")
 
 
 def clave_banco(nombre: str) -> str:
-    """Los dos endpoints escriben los bancos distinto (BANCO DE CREDITO vs
-    BANCO DE CRÉDITO). Se comparan sin tildes; el nombre que se publica conserva
-    la forma acentuada cuando alguna de las fuentes la trae."""
     return " ".join(nombre.translate(ACENTOS).upper().split())
 
 
@@ -258,9 +249,6 @@ CHOQUES = [0]
 
 
 def fundir(base, otra, donde):
-    """Completa en 'base' lo que solo trae 'otra', y contrasta lo que ambas
-    publican. Un hueco en una fuente no es un conflicto: es justo lo que la otra
-    viene a cubrir. Solo se reporta cuando las dos dan un valor y no cuadran."""
     completados = 0
     for texto, num in (("Monto", "_m"),):
         if not base[texto] and otra[texto]:
@@ -288,9 +276,6 @@ def fundir(base, otra, donde):
 
 
 def combinar_operaciones(fuentes):
-    """Une lo que publica cada endpoint. La primera fuente manda, las siguientes
-    rellenan lo que a la primera le falte, y donde ambas coinciden se contrastan.
-    Asi, si una se queda congelada, la otra sostiene la serie."""
     nombres, detalle, bancos, tco_ops, orden = {}, {}, {}, {}, []
     aporte, completados = {}, 0
     CHOQUES[0] = 0
@@ -915,7 +900,7 @@ def ejecutar(reconstruir: bool = False) -> int:
     try:
         descargar(URL_SERIE)
         ok("Fuente BCB accesible")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         error(f"No se pudo acceder a la pagina oficial de la serie: {exc}")
 
     crudos: dict[str, tuple[bytes, str | None]] = {}
@@ -933,7 +918,7 @@ def ejecutar(reconstruir: bool = False) -> int:
             htm = descargar(URL_HTML.format(anio=anio))
             serie_html.update(parsear_html_anual(htm, anio))
             crudos[f"tco/{anio}.html"] = (htm, None)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             aviso(f"Tabla HTML {anio} del BCB no disponible; se omite su validacion: {exc}")
     ok(f"PDF anual leido: {len(serie_pdf)} dias | HTML anual leido: {len(serie_html)} dias")
 
@@ -943,7 +928,7 @@ def ejecutar(reconstruir: bool = False) -> int:
         try:
             crudo = descargar(plantilla.format(desde=PRIMER_CORTE.isoformat(), hasta=hasta))
             fuentes.append((etiqueta, crudo, parsear_operaciones(crudo)))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             aviso(f"La fuente de operaciones '{etiqueta}' no respondio: {exc}")
     if not fuentes:
         raise RuntimeError("Ninguna de las fuentes de operaciones respondio.")
@@ -1045,7 +1030,7 @@ def ejecutar(reconstruir: bool = False) -> int:
 def main() -> int:
     try:
         return ejecutar(reconstruir="--reconstruir" in sys.argv)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         import traceback
         traceback.print_exc()
         error(f"Fallo no controlado: {type(exc).__name__}: {exc}")
@@ -1059,7 +1044,7 @@ def main() -> int:
                 "val_pdf": "ERROR", "val_cv": "ERROR", "val_ops": "ERROR", "val_est": "ERROR",
                 "detalle_texto": f"{type(exc).__name__}: {str(exc)[:90]}",
             })
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         return 1
 
